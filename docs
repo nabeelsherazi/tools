@@ -1,0 +1,30 @@
+#!/bin/bash
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+source "${SCRIPT_DIR}/common/common.sh"
+source "${SCRIPT_DIR}/common/portability.sh"
+
+require_cmd fzf
+
+set -euo pipefail
+
+dir="$HOME/Documents/Datasheets"
+
+if [ ! -d "$dir" ]; then
+    die "datasheets directory $dir doesn't exist :("
+fi
+
+if [ $# -eq 0 ]; then
+    echo "usage: $0 <keywords...>" >&2
+    exit 1
+fi
+
+match="$(find "$dir" -type f -iname '*.pdf' | fzf --query="$*" --select-1 --exit-0 || true)"
+
+if [ -z "${match:-}" ]; then
+    die "no match for: $*"
+fi
+
+print_info "opening best match ${match}"
+open "$match"

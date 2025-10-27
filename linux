@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Pop an Alpine container 
+
+IMAGE="alpine"
+CMD="sh"
+WORKDIR="/workdir"
+
+container system start
+container run --rm -it -v "$(pwd):${WORKDIR}" -w "${WORKDIR}" "${IMAGE}" "${CMD}"
