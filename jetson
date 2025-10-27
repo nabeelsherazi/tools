@@ -1,0 +1,45 @@
+#!/usr/bin/expect -f
+
+# grab terminal size from environment or tput
+set rows [exec tput lines]
+set cols [exec tput cols]
+
+# config
+set port "/dev/ttyUSB0"
+set baud "115200"
+set timeout 1
+set user "jetson"
+set pass "jetson"
+
+# spawn picocom
+spawn tio -b $baud $port
+
+# login
+expect {
+    "login:" {
+        send "$user\r"
+    }
+    timeout {
+        send "$user\r"
+    }
+}
+
+# password
+expect {
+    "Password:" {
+        send "$pass\r"
+    }
+    timeout {}
+}
+
+# shell prompt
+expect {
+    -re {[$#] $} {
+        send "stty rows $rows cols $cols\r"
+        send "resize\r"
+    }
+    timeout {}
+}
+
+# hand over
+interact

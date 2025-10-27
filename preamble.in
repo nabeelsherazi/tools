@@ -1,0 +1,8 @@
+#!/bin/bash
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+source "${SCRIPT_DIR}/common/common.sh"
+source "${SCRIPT_DIR}/common/portability.sh"
+
+set -euo pipefail

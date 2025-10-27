@@ -3,9 +3,8 @@
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 source "${SCRIPT_DIR}/common/common.sh"
-source "${SCRIPT_DIR}/common/portability.sh"
 
-require_cmd fzf
+require_cmd fzf hint:pkg
 
 set -euo pipefail
 
