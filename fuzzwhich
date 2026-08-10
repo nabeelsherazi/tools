@@ -1,0 +1,61 @@
+#!/bin/bash
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+source "${SCRIPT_DIR}/common/common.sh"
+
+if ! is_macos; then
+    die "fuzzwhich only works on macOS"
+fi
+
+require_cmd fzf hint:pkg > /dev/null || exit 1
+
+set -euo pipefail
+
+# Ask Spotlight for every installed app bundle. This covers /Applications,
+# ~/Applications, /System/Applications, and anywhere else an app happens to
+# live, without guessing at fixed search paths.
+apps="$(mdfind "kMDItemContentType == 'com.apple.application-bundle'" 2>/dev/null || true)"
+
+if [ -z "$apps" ]; then
+    die "no applications found (is Spotlight indexing enabled?)"
+fi
+
+# name<TAB>bundle-path, one per line, so fzf can fuzzy-match on the name
+# while we keep the full path around to resolve afterwards.
+choices="$(while IFS= read -r bundle; do
+    printf '%s\t%s\n' "$(basename "$bundle" .app)" "$bundle"
+done <<< "$apps" | sort -u -t $'\t' -k1,1)"
+
+selected="$(fzf --delimiter='\t' --with-nth=1 --query="${*:-}" --select-1 --exit-0 <<< "$choices" || true)"
+
+if [ -z "$selected" ]; then
+    die "no application selected"
+fi
+
+app_bundle="${selected#*$'\t'}"
+
+# Prefer the bundle's declared executable name over guessing.
+info_plist="$app_bundle/Contents/Info.plist"
+exec_name=""
+if [ -f "$info_plist" ]; then
+    exec_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$info_plist" 2>/dev/null || true)"
+fi
+
+if [ -n "$exec_name" ] && [ -x "$app_bundle/Contents/MacOS/$exec_name" ]; then
+    executable="$app_bundle/Contents/MacOS/$exec_name"
+else
+    executable="$(find "$app_bundle/Contents/MacOS" -type f -perm +111 2>/dev/null | head -1)"
+fi
+
+if [ -z "$executable" ]; then
+    die "could not find executable inside $app_bundle"
+fi
+
+# App paths routinely contain spaces (e.g. ".../Google Chrome.app/Contents/
+# MacOS/Google Chrome"), so callers must quote the substitution:
+# "$(fuzzwhich chrome)" --flag. (Symlinking to a space-free name to dodge
+# this was tried and rejected: apps like Chrome resolve sibling frameworks
+# relative to the executable's real location, so launching via a symlink
+# outside the bundle breaks dlopen.)
+echo "$executable"

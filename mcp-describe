@@ -1,0 +1,16 @@
+#!/bin/bash
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+source "${SCRIPT_DIR}/common/common.sh"
+
+NPX=$(require_cmd "npx")
+JQ=$(require_cmd "jq")
+
+if [[ $# -ne 1 ]]; then
+    die "usage: $0 <url>"
+fi
+
+MCP_URL=$1
+
+$NPX -y @modelcontextprotocol/inspector --cli "$MCP_URL" --transport http --method tools/list 2>/dev/null | $JQ -r '(.result.tools // .tools)[] | "=== \(.name) ===\n\(.description)"'
