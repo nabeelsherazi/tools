@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Pop an Alpine container 
+# Pop an Alpine container
 
 IMAGE="alpine"
 CMD="sh"

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 
 source "${SCRIPT_DIR}/common/common.sh"
 
@@ -8,7 +8,7 @@ if ! is_macos; then
     die "fuzzwhich only works on macOS"
 fi
 
-require_cmd fzf hint:pkg > /dev/null || exit 1
+require_cmd fzf hint:pkg >/dev/null || exit 1
 
 set -euo pipefail
 
@@ -25,9 +25,9 @@ fi
 # while we keep the full path around to resolve afterwards.
 choices="$(while IFS= read -r bundle; do
     printf '%s\t%s\n' "$(basename "$bundle" .app)" "$bundle"
-done <<< "$apps" | sort -u -t $'\t' -k1,1)"
+done <<<"$apps" | sort -u -t $'\t' -k1,1)"
 
-selected="$(fzf --delimiter='\t' --with-nth=1 --query="${*:-}" --select-1 --exit-0 <<< "$choices" || true)"
+selected="$(fzf --delimiter='\t' --with-nth=1 --query="${*:-}" --select-1 --exit-0 <<<"$choices" || true)"
 
 if [ -z "$selected" ]; then
     die "no application selected"

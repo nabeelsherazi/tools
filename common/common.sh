@@ -15,26 +15,27 @@ BOLD="$(suppress_error tput bold)"
 UL="$(suppress_error tput smul)"
 ITALIC="$(suppress_error tput sitm)"
 
-print_info()  { printf "${BLU}[info]${RST} %s\n" "$*"; }
-print_warn()  { printf "${YLW}[warn]${RST} %s\n" "$*"; }
-print_log()   { printf "${MAG}[log]${RST} %s\n" "$*"; }
-print_hint()  { printf "${GRN}[hint]${RST} %s\n" "$*"; }
+print_info() { printf "${BLU}[info]${RST} %s\n" "$*"; }
+print_warn() { printf "${YLW}[warn]${RST} %s\n" "$*"; }
+print_log() { printf "${MAG}[log]${RST} %s\n" "$*"; }
+print_hint() { printf "${GRN}[hint]${RST} %s\n" "$*"; }
 print_error() { printf "${RED}[error]${RST} %s\n" "$*" >&2; }
-die()         { print_error "$*"; exit 1; }
-
-#!/bin/bash
+die() {
+    print_error "$*"
+    exit 1
+}
 
 is_macos() {
     case "$(uname -s)" in
-        Darwin*) return 0 ;;
-        *)       return 1 ;;
+    Darwin*) return 0 ;;
+    *) return 1 ;;
     esac
 }
 
 is_linux() {
     case "$(uname -s)" in
-        Linux*) return 0 ;;
-        *)      return 1 ;;
+    Linux*) return 0 ;;
+    *) return 1 ;;
     esac
 }
 
@@ -57,21 +58,21 @@ require_cmd() {
     print_error "missing required command: $1"
 
     case "$2" in
-        hint:pkg)
-            if is_macos; then
-                print_hint "try \`brew install $1\`"
-            else
-                print_hint "try \`apt install $1\`"
-            fi
-            ;;
-        hint:pip)
-            print_hint "try \`python -m pip install $1\`"
-            ;;
-        "")
-            ;;
-        *)
-            print_hint "$2"
-            ;;
+    hint:pkg)
+        if is_macos; then
+            print_hint "try \`brew install $1\`"
+        else
+            print_hint "try \`apt install $1\`"
+        fi
+        ;;
+    hint:pip)
+        print_hint "try \`python -m pip install $1\`"
+        ;;
+    "") ;;
+
+    *)
+        print_hint "$2"
+        ;;
     esac
 
     return 1
@@ -85,6 +86,4 @@ require_oneof_cmd() {
         fi
     done
     die "missing command, require one of: $*"
-    return 1
 }
-
