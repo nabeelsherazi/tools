@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# mini — talk to the mini
+#
+#   mini send <path>...          -> ~/Claude/Inbox (asks first if a path is >1GB)
+#   mini send inbox <path>...    -> ~/Claude/Inbox (same, but never asks)
+#   mini send media <path>...    -> /Volumes/LaCie/Inbox
+#   mini do <command>...         -> run a command on the mini, like ssh does
+#                                   e.g. mini do "cd ~/src/hub && git push"
+set -euo pipefail
+
+# Ctrl-C should abort the whole batch, not just the transfer in flight
+# (rsync failures in `send` are otherwise non-fatal).
+trap 'echo >&2; echo "mini: interrupted" >&2; exit 130' INT
+
+# Remote host lives outside the repo: set MINI_HOST (user@host) in the
+# environment or in ~/.config/mini. The old TOMINI_HOST / ~/.config/tomini
+# names still work.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
+if [ -z "${MINI_HOST:-}" ]; then
+  MINI_HOST="${TOMINI_HOST:-}"
+fi
+for config in "$CONFIG_DIR/mini" "$CONFIG_DIR/tomini"; do
+  if [ -z "$MINI_HOST" ] && [ -f "$config" ]; then
+    # shellcheck source=/dev/null
+    . "$config"
+    MINI_HOST="${MINI_HOST:-${TOMINI_HOST:-}}"
+  fi
+done
+if [ -z "$MINI_HOST" ]; then
+  echo "mini: MINI_HOST not set (put MINI_HOST=user@host in $CONFIG_DIR/mini)" >&2
+  exit 1
+fi
+
+usage() {
+  echo "usage: mini send [inbox|media] <file_or_dir> [more...]" >&2
+  echo "       mini do <command> [args...]" >&2
+  exit 1
+}
+
+# Paths bigger than this need a confirm when the destination is implicit.
+CONFIRM_OVER_KB=$((1024 * 1024)) # 1GB
+
+cmd_send() {
+  local dest_path="/Users/nabeel/Claude/Inbox/"
+
+  # Optional first arg picks a named destination. To push a local file that's
+  # literally named "inbox" or "media", write ./inbox or ./media.
+  local confirm_large=1
+  case "${1:-}" in
+    inbox)
+      confirm_large=0
+      shift
+      ;;
+    media)
+      dest_path="/Volumes/LaCie/Inbox/"
+      confirm_large=0
+      shift
+      ;;
+  esac
+
+  if [ "$#" -eq 0 ]; then
+    usage
+  fi
+
+  local failed=() src size_kb size_gb answer
+  for src in "$@"; do
+    if [ ! -e "$src" ]; then
+      echo "skipping, doesn't exist: $src" >&2
+      continue
+    fi
+
+    # strip any trailing slash so foo and foo/ both mean "copy the dir itself"
+    # (glob expansion, e.g. foo/*, already gives you individual entries — leave those alone)
+    src="${src%/}"
+
+    if [ "$confirm_large" -eq 1 ]; then
+      size_kb=$(du -sk "$src" | cut -f1)
+      if [ "$size_kb" -gt "$CONFIRM_OVER_KB" ]; then
+        size_gb=$(awk -v kb="$size_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
+        # no tty (piped/cron) counts as "no" rather than hanging or sending blind
+        printf '%s is %sGB, push to inbox? [y/N] ' "$src" "$size_gb" >&2
+        if ! read -r answer </dev/tty || [[ ! "$answer" =~ ^[Yy]$ ]]; then
+          echo "skipping: $src (use 'mini send inbox' to skip this prompt)" >&2
+          continue
+        fi
+      fi
+    fi
+
+    # don't let one failed transfer (set -e) silently kill the rest of the batch
+    if ! rsync -avhP \
+      --no-perms --no-owner --no-group \
+      -e ssh \
+      "$src" "${MINI_HOST}:${dest_path}"; then
+      echo "mini: rsync failed for: $src" >&2
+      failed+=("$src")
+    fi
+  done
+
+  if [ "${#failed[@]}" -gt 0 ]; then
+    echo "mini: ${#failed[@]} transfer(s) failed:" >&2
+    printf '  %s\n' "${failed[@]}" >&2
+    exit 1
+  fi
+}
+
+# Same semantics as ssh: the args are joined with spaces and handed to the
+# remote shell, so mini do "cd ~/src/hub && git push" and
+# mini do cd ~/src/hub '&&' git push are equivalent.
+cmd_do() {
+  if [ "$#" -eq 0 ]; then
+    usage
+  fi
+  exec ssh "$MINI_HOST" "$@"
+}
+
+subcmd="${1:-}"
+[ "$#" -gt 0 ] && shift
+case "$subcmd" in
+  send) cmd_send "$@" ;;
+  do) cmd_do "$@" ;;
+  *) usage ;;
+esac
