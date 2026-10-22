@@ -6,6 +6,10 @@
 #   mini send media <path>...    -> /Volumes/LaCie/Inbox
 #   mini do <command>...         -> run a command on the mini, like ssh does
 #                                   e.g. mini do "cd ~/src/hub && git push"
+#   mini mount [--read-only] <path> [name] -> mount a folder from the mini (sshfs via FUSE-T)
+#                                   at ~/mini/<name> and open it in Finder
+#   mini mounts                  -> list active mounts (same as bare `mini mount`)
+#   mini unmount [--all|name]... -> unmount, e.g. mini unmount LaCie
 set -euo pipefail
 
 # Ctrl-C should abort the whole batch, not just the transfer in flight
@@ -13,27 +17,27 @@ set -euo pipefail
 trap 'echo >&2; echo "mini: interrupted" >&2; exit 130' INT
 
 # Remote host lives outside the repo: set MINI_HOST (user@host) in the
-# environment or in ~/.config/mini. The old TOMINI_HOST / ~/.config/tomini
-# names still work.
+# environment or in ~/.config/mini.
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
-if [ -z "${MINI_HOST:-}" ]; then
-  MINI_HOST="${TOMINI_HOST:-}"
+if [ -z "${MINI_HOST:-}" ] && [ -f "$CONFIG_DIR/mini" ]; then
+  # shellcheck source=/dev/null
+  . "$CONFIG_DIR/mini"
 fi
-for config in "$CONFIG_DIR/mini" "$CONFIG_DIR/tomini"; do
-  if [ -z "$MINI_HOST" ] && [ -f "$config" ]; then
-    # shellcheck source=/dev/null
-    . "$config"
-    MINI_HOST="${MINI_HOST:-${TOMINI_HOST:-}}"
-  fi
-done
-if [ -z "$MINI_HOST" ]; then
+if [ -z "${MINI_HOST:-}" ]; then
   echo "mini: MINI_HOST not set (put MINI_HOST=user@host in $CONFIG_DIR/mini)" >&2
   exit 1
 fi
 
+# Mountpoints go here. Under $HOME no sudo is needed; MINI_MOUNT_ROOT=/Volumes
+# works too, but then creating the mountpoint asks for your password.
+MOUNT_ROOT="${MINI_MOUNT_ROOT:-$HOME/mini}"
+
 usage() {
   echo "usage: mini send [inbox|media] <file_or_dir> [more...]" >&2
   echo "       mini do <command> [args...]" >&2
+  echo "       mini mount [--read-only] [--no-open] <remote_path> [name]" >&2
+  echo "       mini mounts" >&2
+  echo "       mini unmount [-f] [--all | name...]" >&2
   exit 1
 }
 
@@ -113,10 +117,221 @@ cmd_do() {
   exec ssh "$MINI_HOST" "$@"
 }
 
+# "name|mountpoint|mount flags" for every mini mount that's currently up.
+# FUSE-T mounts show as "<location>:/<volname> on <mountpoint> (nfs, ...)"
+# (location is "fuse-t" unless /Library/Application Support/fuse-t/cfg/fuse-t.ini
+# sets it, then it reads "localhost"); ours are the ones under MOUNT_ROOT, and
+# volname is the name (it's what Finder shows for the folder).
+list_mounts() {
+  local n mp flags
+  while IFS='|' read -r n mp flags; do
+    case "$mp" in
+      "$MOUNT_ROOT"/*) echo "$n|$mp|$flags" ;;
+    esac
+  done < <(mount | sed -n 's#^[^ :]*:/\(.*\) on \(.*\) (nfs, \(.*\))$#\1|\2|\3#p')
+}
+
+# find_mount <name> -> prints its mountpoint, fails if it isn't mounted
+find_mount() {
+  local n mp flags
+  while IFS='|' read -r n mp flags; do
+    if [ "$n" = "$1" ]; then
+      echo "$mp"
+      return 0
+    fi
+  done < <(list_mounts)
+  return 1
+}
+
+# A root-owned parent (/Volumes) needs sudo for the mountpoint. macOS removes
+# empty directories there on unmount, so only mounting ever asks.
+make_mountpoint() {
+  mkdir -p "$1" 2>/dev/null && return 0
+  sudo mkdir -p "$1" && sudo chown "$(id -u):$(id -g)" "$1"
+}
+
+remove_mountpoint() {
+  [ -d "$1" ] || return 0
+  rmdir "$1" 2>/dev/null || sudo rmdir "$1" 2>/dev/null || true
+}
+
+cmd_mounts() {
+  local n mp flags mode found=0
+  while IFS='|' read -r n mp flags; do
+    mode=rw
+    case "$flags" in *read-only*) mode=ro ;; esac
+    printf '%-16s %s (%s)\n' "$n" "$mp" "$mode"
+    found=1
+  done < <(list_mounts)
+  if [ "$found" -eq 0 ]; then
+    echo "no mini mounts"
+  fi
+}
+
+cmd_mount() {
+  local ro=0 do_open=1 path="" name=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --read-only) ro=1 ;;
+      --no-open) do_open=0 ;;
+      -*) usage ;;
+      *)
+        if [ -z "$path" ]; then
+          path="$1"
+        elif [ -z "$name" ]; then
+          name="$1"
+        else
+          usage
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$path" ]; then
+    cmd_mounts
+    return
+  fi
+
+  if ! command -v sshfs >/dev/null 2>&1; then
+    echo "mini: sshfs not found (brew install --cask fuse-t fuse-t-sshfs)" >&2
+    exit 1
+  fi
+
+  # Resolve on the mini so "~/Desktop" (quoted) and relative paths work, and
+  # so a typo fails here instead of as a mystery mount. The path goes through
+  # the remote shell, hence the %q.
+  local resolved
+  # shellcheck disable=SC2029 # expanding $path here is the point
+  if ! resolved=$(ssh "$MINI_HOST" "p=$(printf '%q' "$path"); case \"\$p\" in '~') p=\$HOME ;; '~/'*) p=\$HOME/\${p#'~/'} ;; esac; cd \"\$p\" && pwd -P"); then
+    echo "mini: can't read $path on the mini" >&2
+    exit 1
+  fi
+
+  if [ -z "$name" ]; then
+    name="$(basename "$resolved")"
+    [ "$name" = "/" ] && name="root"
+  fi
+  case "$name" in
+    */*)
+      echo "mini: name can't contain '/': $name" >&2
+      exit 1
+      ;;
+  esac
+
+  local existing
+  if existing=$(find_mount "$name"); then
+    echo "mini: $name is already mounted at $existing" >&2
+    exit 1
+  fi
+
+  local mp="$MOUNT_ROOT/$name"
+  if [ -e "$mp" ] && [ -n "$(ls -A "$mp" 2>/dev/null)" ]; then
+    echo "mini: $mp exists and isn't empty" >&2
+    exit 1
+  fi
+  make_mountpoint "$mp"
+
+  # location is the "machine" Finder lists the mounts under. FUSE-T only
+  # honors it if it resolves, so /etc/hosts needs "127.0.0.1 Mini" (without
+  # it the name just falls back to localhost).
+  local opts="volname=$name,location=Mini,follow_symlinks,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,BatchMode=yes"
+  if [ "$ro" -eq 1 ]; then
+    opts="ro,$opts"
+  fi
+
+  # FUSE-T's sshfs returns right away; the mount shows up a few seconds later
+  # (took ~10s once), so wait for it rather than trusting the exit status.
+  sshfs "${MINI_HOST}:${resolved}" "$mp" -o "$opts" || true
+  local up=0
+  for _ in $(seq 1 30); do
+    if mount | grep -qF " on $mp ("; then
+      up=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$up" -eq 0 ]; then
+    pkill -f "sshfs ${MINI_HOST}:${resolved} ${mp}" 2>/dev/null || true
+    remove_mountpoint "$mp"
+    echo "mini: mount of $resolved didn't come up" >&2
+    exit 1
+  fi
+
+  echo "mounted ${resolved} at ${mp}$([ "$ro" -eq 1 ] && echo ' (read-only)')"
+  if [ "$do_open" -eq 1 ]; then
+    open "$mp"
+  fi
+}
+
+cmd_unmount() {
+  local all=0 force="" targets="" arg
+  for arg in "$@"; do
+    case "$arg" in
+      --all) all=1 ;;
+      -f | --force) force="force" ;;
+      -*) usage ;;
+      *) targets="${targets}${arg}"$'\n' ;;
+    esac
+  done
+
+  if [ "$all" -eq 1 ]; then
+    targets="$(list_mounts | cut -d'|' -f1)"
+    if [ -z "$targets" ]; then
+      echo "no mini mounts"
+      return
+    fi
+  elif [ -z "$targets" ]; then
+    # nothing named: fine if there's exactly one mount, otherwise show them
+    local active
+    active="$(list_mounts | cut -d'|' -f1)"
+    if [ -z "$active" ]; then
+      echo "no mini mounts"
+      return
+    elif [ "$(printf '%s\n' "$active" | wc -l)" -ne 1 ]; then
+      echo "mini: which one?" >&2
+      cmd_mounts >&2
+      exit 1
+    fi
+    targets="$active"
+  fi
+
+  local name mp bad=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! mp=$(find_mount "$name"); then
+      echo "mini: not mounted: $name" >&2
+      bad=1
+      continue
+    fi
+    # diskutil, not umount: Finder keeps the mount "busy" for plain umount
+    # (it watches every mount for the sidebar), but diskutil gets it released.
+    # shellcheck disable=SC2086 # force is empty or the single word "force"
+    if ! diskutil unmount $force "$mp" >/dev/null; then
+      echo "mini: couldn't unmount $mp (busy? close anything using it, or -f)" >&2
+      bad=1
+      continue
+    fi
+    for _ in $(seq 1 10); do
+      mount | grep -qF " on $mp (" || break
+      sleep 1
+    done
+    remove_mountpoint "$mp"
+    echo "unmounted $name"
+  done <<<"$targets"
+
+  if [ "$bad" -eq 1 ]; then
+    exit 1
+  fi
+}
+
 subcmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$subcmd" in
   send) cmd_send "$@" ;;
   do) cmd_do "$@" ;;
+  mount) cmd_mount "$@" ;;
+  mounts) cmd_mounts ;;
+  unmount | umount) cmd_unmount "$@" ;;
   *) usage ;;
 esac
