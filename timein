@@ -1,0 +1,170 @@
+#!/bin/bash
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+
+source "${SCRIPT_DIR}/common/common.sh"
+
+CURL=$(require_cmd curl) || exit 1
+JQ=$(require_cmd jq hint:pkg) || exit 1
+
+set -euo pipefail
+
+# timein — current time in a place
+#
+#   timein los angeles
+#   timein california        (also: cali, ca)
+#   timein portland, oregon  (text after a comma narrows the match)
+#   timein America/Chicago   (IANA zone names work directly)
+
+if [ $# -eq 0 ]; then
+    echo "usage: $(basename "$0") <place...>" >&2
+    exit 1
+fi
+
+query="$*"
+
+# name|abbreviation|IANA zone|spans multiple zones (*)
+# Geocoding "california" finds a tiny town in Missouri, and "cali" finds Cali,
+# Colombia, so US states and a few nicknames are resolved locally first. States
+# that span zones get their most populous zone.
+PLACES='alabama|al|America/Chicago|
+alaska|ak|America/Anchorage|*
+arizona|az|America/Phoenix|
+arkansas|ar|America/Chicago|
+california|ca|America/Los_Angeles|
+colorado|co|America/Denver|
+connecticut|ct|America/New_York|
+delaware|de|America/New_York|
+florida|fl|America/New_York|*
+georgia|ga|America/New_York|
+hawaii|hi|Pacific/Honolulu|
+idaho|id|America/Boise|*
+illinois|il|America/Chicago|
+indiana|in|America/Indiana/Indianapolis|*
+iowa|ia|America/Chicago|
+kansas|ks|America/Chicago|*
+kentucky|ky|America/New_York|*
+louisiana||America/Chicago|
+maine|me|America/New_York|
+maryland|md|America/New_York|
+massachusetts|ma|America/New_York|
+michigan|mi|America/Detroit|*
+minnesota|mn|America/Chicago|
+mississippi|ms|America/Chicago|
+missouri|mo|America/Chicago|
+montana|mt|America/Denver|
+nebraska|ne|America/Chicago|*
+nevada|nv|America/Los_Angeles|
+new hampshire|nh|America/New_York|
+new jersey|nj|America/New_York|
+new mexico|nm|America/Denver|
+new york|ny|America/New_York|
+north carolina|nc|America/New_York|
+north dakota|nd|America/Chicago|*
+ohio|oh|America/New_York|
+oklahoma|ok|America/Chicago|
+oregon|or|America/Los_Angeles|*
+pennsylvania|pa|America/New_York|
+rhode island|ri|America/New_York|
+south carolina|sc|America/New_York|
+south dakota|sd|America/Chicago|*
+tennessee|tn|America/Chicago|*
+texas|tx|America/Chicago|*
+utah|ut|America/Denver|
+vermont|vt|America/New_York|
+virginia|va|America/New_York|
+washington|wa|America/Los_Angeles|
+west virginia|wv|America/New_York|
+wisconsin|wi|America/Chicago|
+wyoming|wy|America/Denver|
+washington dc|dc|America/New_York|
+los angeles|la|America/Los_Angeles|
+san francisco|sf|America/Los_Angeles|
+bay area||America/Los_Angeles|
+las vegas|vegas|America/Los_Angeles|
+philadelphia|philly|America/New_York|
+new york city|nyc|America/New_York|'
+
+# Print the table row for $1: exact name/abbreviation first, then a prefix of
+# exactly one name (so "cali" is California but "new" falls through to the
+# geocoder rather than guessing between New Jersey and New York).
+lookup_place() {
+    local needle matches
+    needle="$(tr '[:upper:]' '[:lower:]' <<<"$1")"
+
+    awk -F'|' -v q="$needle" '$1 == q || $2 == q { print; found = 1; exit } END { exit !found }' <<<"$PLACES" && return 0
+
+    [ "${#needle}" -ge 3 ] || return 1
+    matches="$(awk -F'|' -v q="$needle" 'index($1, q) == 1' <<<"$PLACES")"
+    [ "$(wc -l <<<"$matches")" -eq 1 ] && [ -n "$matches" ] && echo "$matches"
+}
+
+show_time() {
+    local label="$1" zone="$2" note="${3:-}"
+    printf '%s%s%s  %s  %s(%s)%s\n' \
+        "$BOLD" "$label" "$RST" \
+        "$(TZ="$zone" date '+%a %b %-d, %-I:%M %p %Z')" \
+        "$ITALIC" "$zone" "$RST"
+    if [ -n "$note" ]; then
+        print_hint "$note"
+    fi
+}
+
+# An IANA zone name (America/Chicago) works as-is.
+if [[ $query == */* ]] && [ -e "/usr/share/zoneinfo/${query// /_}" ]; then
+    zone="${query// /_}"
+    show_time "${zone##*/}" "$zone"
+    exit 0
+fi
+
+# "portland, oregon": the first part is the name, the rest narrows the match.
+name="${query%%,*}"
+name="${name#"${name%%[![:space:]]*}"}"
+name="${name%"${name##*[![:space:]]}"}"
+filter=""
+if [[ $query == *,* ]]; then
+    filter="${query#*,}"
+    filter="${filter#"${filter%%[![:space:]]*}"}"
+    filter="${filter%"${filter##*[![:space:]]}"}"
+fi
+
+if [ -z "$filter" ] && row="$(lookup_place "$name")"; then
+    IFS='|' read -r state_name _ zone multi <<<"$row"
+    label="$(awk '{ for (i = 1; i <= NF; i++) $i = toupper(substr($i, 1, 1)) substr($i, 2) } 1' <<<"$state_name")"
+    note=""
+    if [ -n "$multi" ]; then
+        note="$label spans multiple timezones; showing the most populous one"
+    fi
+    show_time "$label" "$zone" "$note"
+    exit 0
+fi
+
+response="$("$CURL" -fsS --max-time 10 --get "https://geocoding-api.open-meteo.com/v1/search" \
+    --data-urlencode "name=$name" -d count=10 -d language=en 2>&1)" ||
+    die "geocoding lookup failed: $response"
+
+# Keep results whose region or country starts with the text after the comma.
+# shellcheck disable=SC2016 # $f is a jq variable, not a shell one
+results="$("$JQ" -c --arg f "$filter" '
+    [(.results // [])[]
+     | select($f == "" or ([.admin1, .country, .country_code]
+         | map(select(. != null) | ascii_downcase | startswith($f | ascii_downcase))
+         | any))]' <<<"$response")"
+
+if [ "$("$JQ" length <<<"$results")" -eq 0 ]; then
+    die "couldn't find a place called '$query'"
+fi
+
+IFS=$'\t' read -r label zone < <("$JQ" -r '.[0] | [([.name, .admin1, .country] | map(select(. != null)) | join(", ")), .timezone] | @tsv' <<<"$results")
+
+show_time "$label" "$zone"
+
+# Same name, different timezone elsewhere: say so rather than silently guessing.
+# shellcheck disable=SC2016 # $z is a jq variable, not a shell one
+others="$("$JQ" -r --arg z "$zone" '
+    [.[1:][] | select(.timezone != $z and (.population // 0) >= 100000)
+     | [.name, .admin1, .country] | map(select(. != null)) | join(", ")]
+    | unique | .[:3] | join(" | ")' <<<"$results")"
+if [ -n "$others" ]; then
+    print_hint "also matched: $others (add a region, e.g. 'timein $name, <state or country>')"
+fi
